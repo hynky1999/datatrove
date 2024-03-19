@@ -81,8 +81,9 @@ def reader_factory(data_folder: DataFolder, reader_type: str = None, **kwargs):
         console.log(f'[red]Could not find any files in "{data_folder.path}"')
         sys.exit(-1)
 
+    print(data_files[0])
     if not reader_type:
-        match data_files[0][data_files.index(".") :]:
+        match data_files[0][data_files[0].index(".") :]:
             case ".jsonl.gz" | ".jsonl" | ".json":
                 reader_type = "jsonl"
             case ".csv":
@@ -133,6 +134,12 @@ def main():
         filter_expr_text = Confirm.get_input(console, "Type your filtering expression: ", password=False)
     filter_expr = get_filter_expr(filter_expr_text)
 
+    def filter_expr_fc(x):
+        import tldextract
+        return tldextract.extract(x.metadata.get("url")).suffix == "video"
+
+    filter_expr = filter_expr_fc
+
     good_samples = []
     bad_samples = []
     iterator = sampler(reader())
@@ -143,7 +150,7 @@ def main():
             with console.pager(styles=True):
                 console.print(
                     Panel(
-                        f"[yellow]Data ID:[reset] {sample.data_id}\n"
+                        f"[yellow]Data ID:[reset] {1}\n"
                         f"[yellow]Metadata:[reset]\n"
                         + "\n".join(f"- [blue]{field}: [reset] {value}" for field, value in sample.metadata.items())
                     )
