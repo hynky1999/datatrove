@@ -1,3 +1,4 @@
+import random
 from abc import abstractmethod
 from contextlib import nullcontext
 from typing import Callable
@@ -11,6 +12,20 @@ from datatrove.pipeline.base import PipelineStep
 
 
 class BaseReader(PipelineStep):
+    """Base module for Readers. Readers read data from a source and create documents.
+        Reader are the first step in a pipeline usually.
+
+    Args:
+        limit: limit the number of documents to read. Useful for debugging
+        progress: show tqdm progress bar. Might be spammy in some environments
+        adapter: function to adapt the data dict from the source to a Document.
+            Take as input: data: dict, path: str, id_in_file: int | str
+            Return: a dict with at least a "text" key
+        text_key: key to use for the text in the default adapter (default: "text"). Ignored if you provide your own `adapter`
+        id_key: key to use for the id in the default adapter (default: "id"). Ignored if you provide your own `adapter`
+        default_metadata: default metadata to add to all documents
+    """
+
     type = "📖 - READER"
 
     def __init__(
@@ -93,6 +108,20 @@ class BaseReader(PipelineStep):
 
 
 class BaseDiskReader(BaseReader):
+    """Base module for fsspec based Readers. Readers read data from a source (local or remote) and create documents.
+
+    Args:
+        data_folder: the data folder to read from
+        limit: limit the number of documents to read. Useful for debugging
+        progress: show progress bar
+        adapter: function to adapt the data from the source to a Document
+        text_key: key to use for the text in the default adapter (default: "text"). Ignored if you provide your own `adapter`
+        id_key: key to use for the id in the default adapter (default: "id"). Ignored if you provide your own `adapter`
+        default_metadata: default metadata to add to all documents
+        recursive: whether to read files recursively
+        glob_pattern: glob pattern to filter files
+    """
+
     type = "📖 - READER"
 
     def __init__(
@@ -106,6 +135,7 @@ class BaseDiskReader(BaseReader):
         default_metadata: dict = None,
         recursive: bool = True,
         glob_pattern: str | None = None,
+        shuffle_files: bool = False,
     ):
         """
 
@@ -119,11 +149,14 @@ class BaseDiskReader(BaseReader):
             default_metadata: a dictionary with any data that should be added to all sample's metadata
             recursive: whether to search recursively for files
             glob_pattern: pattern that all files must match exactly to be included (relative to data_folder)
+            shuffle_files: shuffle the files within the returned shard. Mostly used for data viz. purposes, do not use
+            with dedup blocks
         """
         super().__init__(limit, progress, adapter, text_key, id_key, default_metadata)
         self.data_folder = get_datafolder(data_folder)
         self.recursive = recursive
         self.glob_pattern = glob_pattern
+        self.shuffle_files = shuffle_files
 
     def get_document_from_dict(self, data: dict, source_file: str, id_in_file: int):
         document = super().get_document_from_dict(data, source_file, id_in_file)
@@ -191,6 +224,8 @@ class BaseDiskReader(BaseReader):
                 raise RuntimeError(f"No files found on {self.data_folder.path}!")
             # otherwise just a warning
             logger.warning(f"No files found on {self.data_folder.path} for {rank=}")
+        if self.shuffle_files:
+            random.shuffle(files_shard)
         for doc in self.read_files_shard(files_shard):
             self.update_doc_stats(doc)
             yield doc

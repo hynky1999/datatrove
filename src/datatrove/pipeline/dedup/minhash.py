@@ -4,7 +4,6 @@ import os
 import re
 import struct
 from dataclasses import dataclass
-from functools import cache
 from typing import Generator
 
 import numpy as np
@@ -14,7 +13,13 @@ from loguru import logger
 from datatrove.data import DocumentsPipeline
 from datatrove.io import DataFolderLike, get_datafolder
 from datatrove.pipeline.base import PipelineStep
-from datatrove.pipeline.dedup.utils import read_tuples_from_file, sha1_hash32, sha1_hash64, simplify_text
+from datatrove.pipeline.dedup.utils import (
+    read_tuples_from_file,
+    seek_to_start,
+    sha1_hash32,
+    sha1_hash64,
+    simplify_text,
+)
 from datatrove.pipeline.writers.disk_base import DiskWriter
 from datatrove.utils.typeshelper import StatHints
 
@@ -35,6 +40,16 @@ SENTINEL = (1 << 32) - 1
 
 @dataclass
 class MinhashConfig:
+    """Configuration for Min-Hash deduplication
+
+    Args:
+        n_grams: n-grams size to use
+        num_buckets: number of buckets to use
+        hashes_per_bucket: number of hashes per bucket
+        use_64bit_hashes: use 64bit hashes. Uses 32bit hashes if `False`
+        seed: random seed used to generate the hash function parameters. Should be the same on all workers to ensure they all have the same parameters
+    """
+
     n_grams: int = 5
 
     num_buckets: int = 14
@@ -63,6 +78,15 @@ DEFAULT_MINHASH_CONFIG = MinhashConfig()
 
 @dataclass(order=True)
 class HashSig:
+    """Hash signature for a given document in a given bucket
+
+    Args:
+        sig: tuple of hashes
+        file_id: file id
+        doc_id: document id
+        reader_id: reader id. Used to know from where the next signature should be requested
+    """
+
     sig: tuple[int]
     file_id: int
     doc_id: int
@@ -70,49 +94,6 @@ class HashSig:
 
     def is_from_index(self):
         return self.reader_id != self.file_id
-
-
-def seek_to_start(f: AbstractBufferedFile, start_hash: int, config: MinhashConfig, index_file: bool = False):
-    if start_hash == 0:
-        return
-    line_size = struct.calcsize(f"{config.hashes_per_bucket}{config.hash_format}{'I' if not index_file else ''}")
-    nr_lines = f.size // line_size
-
-    @cache
-    def read_line_start(line):
-        assert line >= 0 and line < nr_lines
-        f.seek(line * line_size, os.SEEK_SET)
-        return struct.unpack(config.hash_format, f.read(struct.calcsize(config.hash_format)))[0]
-
-    # save some time with binary search
-    # this file is strictly bigger
-    if read_line_start(0) >= start_hash:
-        f.seek(0, os.SEEK_SET)
-        return
-
-    # this file is strictly smaller, ignore it completely
-    if read_line_start(nr_lines - 1) < start_hash:
-        f.seek(0, os.SEEK_END)
-        return
-
-    # binary search to find start line
-    start_line, hi = 0, nr_lines
-    # Note, the comparison uses "<" to match the
-    # __lt__() logic in list.sort() and in heapq.
-    while start_line < hi:
-        mid = (start_line + hi) // 2
-        if read_line_start(mid) < start_hash:
-            start_line = mid + 1
-        else:
-            hi = mid
-
-    if start_line > nr_lines:
-        raise ValueError
-
-    # verification check. we know start_line > 0 from the check above
-    if (prev_hash := read_line_start(start_line - 1)) >= start_hash:
-        raise ValueError(f"Wrong bsearch start line: {prev_hash=} >= {start_hash=}")
-    f.seek(start_line * line_size, os.SEEK_SET)
 
 
 def read_sigs(
@@ -123,13 +104,23 @@ def read_sigs(
     min_hash: int = 0,
     max_hash: int = _mersenne_prime,
     ensure_order: bool = True,
+    lines_to_buffer: int = 5,
 ) -> Generator:
+    """Read signatures from a file
+
+    Args:
+        file: file to read from
+        reader_id: reader id
+        config: minhash configuration (a MinhashConfig object)
+        index_file: is index file
+    """
+    line_format = f"{config.hashes_per_bucket}{config.hash_format}{'I' if not index_file else ''}"
     with file as f:
-        seek_to_start(f, min_hash, config, index_file)
+        if f.size == 0:
+            return
+        seek_to_start(f, min_hash, line_format, config.hash_format)
         last = None
-        for data in read_tuples_from_file(
-            f, f"{config.hashes_per_bucket}{config.hash_format}{'I' if not index_file else ''}"
-        ):
+        for data in read_tuples_from_file(f, line_format, lines_to_buffer=lines_to_buffer):
             sigdata = data if index_file else data[:-1]
             assert sigdata[0] >= min_hash and (
                 ensure_order is False or last is None or sigdata >= last
@@ -145,6 +136,15 @@ def read_sigs(
 
 
 class MinhashDedupSignature(PipelineStep):
+    """Minhash Deduplication: First Pipeline Step
+
+        Compute the minhash signature for each document and write it to disk.
+
+    Args:
+        output_folder: output folder
+        config: minhash configuration (a MinhashConfig object)
+    """
+
     type = "🫂 - DEDUP"
     name = "🎯 MinHash stage 1"
     _requires_dependencies = ["nltk"]
@@ -162,10 +162,13 @@ class MinhashDedupSignature(PipelineStep):
 
     @property
     def parameters(self):
+        """Minhash parameters
+
+        Create parameters for a random bijective permutation function
+        that maps a 32-bit hash value to another 32-bit hash value.
+        http://en.wikipedia.org/wiki/Universal_hashing
+        """
         if not self._parameters:
-            # Create parameters for a random bijective permutation function
-            # that maps a 32-bit hash value to another 32-bit hash value.
-            # http://en.wikipedia.org/wiki/Universal_hashing
             gen = np.random.RandomState(self.config.seed)
             self._parameters = (
                 gen.randint(1, _mersenne_prime, dtype=np.uint64, size=(1, self.num_hashes)),
@@ -173,7 +176,15 @@ class MinhashDedupSignature(PipelineStep):
             )
         return self._parameters
 
-    def get_signature(self, shingles):
+    def get_signature(self, shingles: np.ndarray) -> list[list[int]]:
+        """Get the signature for a set of shingles (n-grams)
+
+        Args:
+            shingles: shingles (n-grams) numpy uint64 array of size (N, 1)
+
+        Returns:
+            list (num buckets) of lists of integers (hashes)
+        """
         a, b = self.parameters
         phv = (shingles * a + b) % _mersenne_prime
         if not self.config.use_64bit_hashes:
@@ -182,7 +193,17 @@ class MinhashDedupSignature(PipelineStep):
             x.tolist() for x in np.split(np.min(phv, axis=0).astype(self.config.hash_dtype), self.config.num_buckets)
         ]
 
-    def get_shingles(self, text):
+    def get_shingles(self, text: str) -> np.ndarray:
+        """Get shingles (hashed n-grams) from a string of text
+
+        Shingles are created by hashing n-grams of simplified text (lower cases, whitespace normalized, no punctuation, etc).
+
+        Args:
+            text: input text
+
+        Returns:
+            numpy array of shingles: dtype = uint64, shape = (number of n_grams in string, 1)
+        """
         from nltk import ngrams, word_tokenize
 
         return np.fromiter(
@@ -224,6 +245,7 @@ class MinhashDedupSignature(PipelineStep):
                         -1,
                         self.config,
                         ensure_order=False,
+                        lines_to_buffer=-1,  # load everything in one go
                     )
                 )
                 with self.output_folder.open(f"bucket_{bi:03d}/{rank:05d}.minhash.sig", mode="wb") as fo:
@@ -236,6 +258,19 @@ class MinhashDedupSignature(PipelineStep):
 
 
 class MinhashDedupBuckets(PipelineStep):
+    """Minhash Deduplication: Second Pipeline Step
+
+        Find duplicate pairs from the signatures and possibly an index. Can also save an index with the new signatures.
+
+    Args:
+        input_folder: input folder containing the signature from step 1
+        output_folder: output folder where results (document duplicate pairs) will be saved
+        index_folder: index folder. If set, we will load all index files in this folder and use them as a reference for deduplicating the current dataset (remove any matches on our dataset with signatures from the index)
+        config: minhash configuration (a MinhashConfig object)
+        only_dedup_in_index: only deduplicate versus index (ignore any matches between 2 documents in our input dataset)
+        create_index_name: create index name. If this parameter is set, index files will be created with this name that other datasets can use as a reference for dedup. Set to `None` to disable index file creation.
+    """
+
     type = "🫂 - DEDUP"
     name = "🎯 MinHash stage 2"
 
@@ -247,6 +282,7 @@ class MinhashDedupBuckets(PipelineStep):
         config: MinhashConfig = DEFAULT_MINHASH_CONFIG,
         only_dedup_in_index: bool = True,
         create_index_name: str = None,
+        lines_to_buffer: int = 5,
     ):
         super().__init__()
         self.input_folder = get_datafolder(input_folder)
@@ -255,6 +291,7 @@ class MinhashDedupBuckets(PipelineStep):
         self.config = config
         self.only_dedup_in_index = only_dedup_in_index
         self.create_index_name = create_index_name
+        self.lines_to_buffer = lines_to_buffer
 
     def get_worker_hash_range(self, sig_files, rank, world_size):
         workers_per_bucket = world_size // self.config.num_buckets
@@ -298,7 +335,14 @@ class MinhashDedupBuckets(PipelineStep):
             )
 
             sig_readers = [
-                read_sigs(file, file_i, self.config, min_hash=hash_min, max_hash=hash_max)
+                read_sigs(
+                    file,
+                    file_i,
+                    self.config,
+                    min_hash=hash_min,
+                    max_hash=hash_max,
+                    lines_to_buffer=self.lines_to_buffer,
+                )
                 for file_i, file in enumerate(self.input_folder.open_files(sig_files, mode="rb"))
             ]
 
@@ -324,6 +368,7 @@ class MinhashDedupBuckets(PipelineStep):
                             index_file=True,
                             min_hash=hash_min,
                             max_hash=hash_max,
+                            lines_to_buffer=self.lines_to_buffer,
                         )
                         for file_i, file in enumerate(self.index_folder.open_files(index_files, mode="rb"))
                     ]
@@ -371,6 +416,11 @@ class MinhashDedupBuckets(PipelineStep):
 
 
 class MinhashDedupCluster(PipelineStep):
+    """Minhash Deduplication: Third Pipeline Step
+
+    Cluster the documents using the previously found duplicate pairs. If A-B and B-C are duplicate pairs, then we will have the A-B-C cluster. Only one document per cluster will be kept after filtering
+    """
+
     type = "🫂 - DEDUP"
     name = "🎯 MinHash stage 3"
 
@@ -380,12 +430,16 @@ class MinhashDedupCluster(PipelineStep):
         output_folder: DataFolderLike,
         config: MinhashConfig = DEFAULT_MINHASH_CONFIG,
         save_cluster_id: bool = False,
+        ignore_index_matches: bool = False,
+        lines_to_buffer: int = 5,
     ):
         super().__init__()
         self.input_folder = get_datafolder(input_folder)
         self.output_folder = get_datafolder(output_folder)
         self.config = config
         self.save_cluster_id = save_cluster_id
+        self.ignore_index_matches = ignore_index_matches
+        self.lines_to_buffer = lines_to_buffer
 
     def run(self, data: DocumentsPipeline = None, _: int = 0, world_size: int = 1):
         dup_files = self.input_folder.list_files(glob_pattern="*.dups")
@@ -404,8 +458,11 @@ class MinhashDedupCluster(PipelineStep):
         with self.track_time():
             for dup_file in dup_files:
                 with self.input_folder.open(dup_file, "rb") as dupf:
-                    for f1, d1, f2, d2 in read_tuples_from_file(dupf, "4I"):
+                    for f1, d1, f2, d2 in read_tuples_from_file(dupf, "4I", lines_to_buffer=self.lines_to_buffer):
                         a, b = (f1, d1), (f2, d2)
+                        if self.ignore_index_matches and a == (SENTINEL, SENTINEL):
+                            # if we are skipping matches with the index and "a" is from the index
+                            continue
                         union_set[parent(b)] = parent(a)
 
             ci = 0
@@ -428,6 +485,11 @@ class MinhashDedupCluster(PipelineStep):
 
 
 class MinhashDedupFilter(PipelineStep):
+    """Minhash Deduplication: Fourth (and final) Pipeline Step
+
+    Filter the documents based on the minhash clusters to keep only one per cluster
+    """
+
     type = "🫂 - DEDUP"
     name = "🎯 MinHash stage 4"
 
@@ -436,11 +498,13 @@ class MinhashDedupFilter(PipelineStep):
         input_folder: DataFolderLike,
         exclusion_writer: DiskWriter = None,
         load_cluster_ids: bool = False,
+        lines_to_buffer: int = 5,
     ):
         super().__init__()
         self.data_folder = get_datafolder(input_folder)
         self.exclusion_writer = exclusion_writer
         self.load_cluster_ids = load_cluster_ids
+        self.lines_to_buffer = lines_to_buffer
 
     def run(self, data: DocumentsPipeline, rank: int = 0, world_size: int = 1):
         clusters_data = self.data_folder.get_shard(rank, world_size, glob_pattern="*.clusters")
@@ -465,7 +529,7 @@ class MinhashDedupFilter(PipelineStep):
                 def load_clusters():
                     if clusters_data:
                         with self.data_folder.open(clusters_data[0], "rb") as clustersf:
-                            yield from read_tuples_from_file(clustersf, "2I")
+                            yield from read_tuples_from_file(clustersf, "2I", lines_to_buffer=self.lines_to_buffer)
 
                 if self.load_cluster_ids:
                     cluster_loader = load_clusters()
@@ -492,6 +556,11 @@ class MinhashDedupFilter(PipelineStep):
 
 
 class MinhashBuildIndex(PipelineStep):
+    """Minhash Deduplication
+
+    Only build an index from the signatures, without deduplicating
+    """
+
     type = "🫂 - DEDUP"
     name = "🎯 MinHash build index"
 
@@ -501,19 +570,21 @@ class MinhashBuildIndex(PipelineStep):
         output_folder: DataFolderLike,
         index_name: str,
         config: MinhashConfig = DEFAULT_MINHASH_CONFIG,
+        lines_to_buffer: int = 5,
     ):
         super().__init__()
         self.input_folder = input_folder
         self.output_folder = output_folder
         self.config = config
         self.index_name = index_name
+        self.lines_to_buffer = lines_to_buffer
 
     def run(self, data: DocumentsPipeline = None, bucket: int = 0, world_size: int = 1):
         assert data is None, "You should not use an input block before MinhashBuildIndex"
         assert world_size == self.config.num_buckets, "You must run exactly one task per bucket"
         sig_files = self.input_folder.list_files(subdirectory=f"bucket_{bucket:03d}")
         sig_readers = [
-            read_sigs(file, file_i, self.config)
+            read_sigs(file, file_i, self.config, lines_to_buffer=self.lines_to_buffer)
             for file_i, file in enumerate(self.input_folder.open_files(sig_files, mode="rb"))
         ]
 

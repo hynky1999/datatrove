@@ -150,7 +150,7 @@ def main():
             with console.pager(styles=True):
                 console.print(
                     Panel(
-                        f"[yellow]Data ID:[reset] {1}\n"
+                        f"[yellow]Data ID:[reset] {sample.id}\n"
                         f"[yellow]Metadata:[reset]\n"
                         + "\n".join(f"- [blue]{field}: [reset] {value}" for field, value in sample.metadata.items())
                     )

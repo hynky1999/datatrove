@@ -1,3 +1,4 @@
+import time
 from copy import deepcopy
 from functools import partial
 from typing import Callable
@@ -12,44 +13,49 @@ from datatrove.utils.stats import PipelineStats
 
 
 class LocalPipelineExecutor(PipelineExecutor):
+    """Executor to run a pipeline locally
+
+    Args:
+        pipeline: a list of PipelineStep and/or custom lamdba functions
+            with arguments (data: DocumentsPipeline, rank: int,
+            world_size: int)
+        tasks: total number of tasks to run the pipeline on (default: 1)
+        workers: how many tasks to run simultaneously. (default is -1 for no limit aka tasks)
+        logging_dir: where to save logs, stats, etc. Should be parsable into a datatrove.io.DataFolder
+        skip_completed: whether to skip tasks that were completed in
+            previous runs. default: True
+        start_method: method to use to spawn a multiprocessing Pool (default: "forkserver")
+        local_tasks: how many of the total tasks should be run on this node/machine. -1 for all
+        local_rank_offset: the rank of the first task to run on this machine.
+            Tasks [local_rank_offset, local_rank_offset + local_tasks] will be run.
+        depends: another LocalPipelineExecutor that should run
+            before this one
+    """
+
     def __init__(
         self,
         pipeline: list[PipelineStep | Callable],
         tasks: int = 1,
         workers: int = -1,
         logging_dir: DataFolderLike = None,
+        depends: "LocalPipelineExecutor" = None,
         skip_completed: bool = True,
         start_method: str = "forkserver",
         local_tasks: int = -1,
         local_rank_offset: int = 0,
     ):
-        """Execute a pipeline locally
-
-        Args:
-            pipeline: a list of PipelineStep and/or custom functions
-                with arguments (data: DocumentsPipeline, rank: int,
-                world_size: int)
-            tasks: total number of tasks to run the pipeline on
-            workers: how many tasks to run simultaneously. -1 for no
-                limit
-            logging_dir: where to save logs, stats, etc. Should be parsable into a datatrove.io.DataFolder
-            skip_completed: whether to skip tasks that were completed in
-                previous runs. default: True
-            start_method: method to use to spawn a multiprocessing Pool
-            local_tasks: how many of the total tasks should be run on this node/machine. -1 for all
-            local_rank_offset: the rank of the first task to run on this machine.
-                Tasks [local_rank_offset, local_rank_offset + local_tasks] will be run.
-        """
         super().__init__(pipeline, logging_dir, skip_completed)
         self.tasks = tasks
         self.workers = workers if workers != -1 else tasks
         self.start_method = start_method
         self.local_tasks = local_tasks if local_tasks != -1 else tasks
         self.local_rank_offset = local_rank_offset
+        self.depends = depends
         if self.local_rank_offset + self.local_tasks > self.tasks:
             raise ValueError(
                 f"Local tasks go beyond the total tasks (local_rank_offset + local_tasks = {self.local_rank_offset + self.local_tasks} > {self.tasks} = tasks)"
             )
+        self._launched = False
 
     def _launch_run_for_rank(self, rank: int, ranks_q, completed=None, completed_lock=None) -> PipelineStats:
         """
@@ -82,6 +88,19 @@ class LocalPipelineExecutor(PipelineExecutor):
         Returns:
 
         """
+        assert not self.depends or (
+            isinstance(self.depends, LocalPipelineExecutor)
+        ), "depends= must be a LocalPipelineExecutor"
+        if self.depends:
+            # take care of launching any unlaunched dependencies
+            if not self.depends._launched:
+                logger.info(f'Launching dependency job "{self.depends}"')
+                self.depends.run()
+            while (incomplete := len(self.depends.get_incomplete_ranks())) > 0:
+                logger.info(f"Dependency job still has {incomplete}/{self.depends.world_size} tasks. Waiting...")
+                time.sleep(2 * 60)
+
+        self._launched = True
         if all(map(self.is_rank_completed, range(self.local_rank_offset, self.local_rank_offset + self.local_tasks))):
             logger.info(f"Not doing anything as all {self.local_tasks} tasks have already been completed.")
             return

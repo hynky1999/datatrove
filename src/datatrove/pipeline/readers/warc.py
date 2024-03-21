@@ -9,8 +9,28 @@ if TYPE_CHECKING:
 
 
 class WarcReader(BaseDiskReader):
+    """Read data from WARC files.
+        Will read each record as a separate document.
+
+    Args:
+        data_folder: the data folder to read from
+        compression: the compression to use (default: "infer")
+        limit: limit the number of WARC documents to read
+        progress: show progress bar
+        adapter: function to adapt the data dict from the source to a Document.
+            Take as input: data: dict, path: str, id_in_file: int | str
+            Return: a dict with at least a "text" key
+        text_key: key to use for the text in the default adapter (default: "text"). Ignored if you provide your own `adapter`
+        id_key: key to use for the id in the default adapter (default: "id"). Ignored if you provide your own `adapter`
+        default_metadata: default metadata to add to all documents
+        recursive: if True, will read files recursively in subfolders (default: True)
+        glob_pattern: a glob pattern to filter files to read (default: None)
+        shuffle_files: shuffle the files within the returned shard. Mostly used for data viz. purposes, do not use
+            with dedup blocks
+    """
+
     name = "🕷 Warc"
-    _requires_dependencies = ["warcio", ("cchardet", "faust-chardet"), ("magic", "python-magic")]
+    _requires_dependencies = ["warcio", ("cchardet", "faust-cchardet"), ("magic", "python-magic")]
 
     def __init__(
         self,
@@ -24,10 +44,20 @@ class WarcReader(BaseDiskReader):
         default_metadata: dict = None,
         recursive: bool = True,
         glob_pattern: str | None = None,
+        shuffle_files: bool = False,
     ):
         self.compression = compression
         super().__init__(
-            data_folder, limit, progress, adapter, text_key, id_key, default_metadata, recursive, glob_pattern
+            data_folder,
+            limit,
+            progress,
+            adapter,
+            text_key,
+            id_key,
+            default_metadata,
+            recursive,
+            glob_pattern,
+            shuffle_files,
         )
 
     def read_file(self, filepath: str):
@@ -46,6 +76,7 @@ class WarcReader(BaseDiskReader):
 
 
 def process_record(record: "ArcWarcRecord") -> dict | None:
+    """Process a WARC record to extract the html and metadata (id, url, date)."""
     import cchardet
     import magic
 
