@@ -2,6 +2,7 @@ from collections import defaultdict
 import heapq
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import struct
 from typing import Callable, Generator
 
 import numpy as np
@@ -65,8 +66,9 @@ class GramFinderSignature(PipelineStep):
     def save(self, rank: int, signatures):
         # explicitly define little endiannes
         signatures = np.array(signatures, dtype=[("ngram", f"<U{self.config.ngram}"), ("count", "<u8")])
-        signatures.sort(axis=0)
-        signatures.tofile(self.output_folder.open(f"{rank:04d}{ExtensionHelperSD.stage_1_signature}", "wb"))
+        signatures = np.sort(signatures)
+        with self.output_folder.open(f"{rank:04d}{ExtensionHelperSD.stage_1_signature}", "wb") as f:
+            f.write(signatures.tobytes())
 
     def get_ngrams(self, doc: Document):
         from nltk import ngrams
@@ -90,24 +92,17 @@ class GramFinderSignature(PipelineStep):
 
         """
         counter = defaultdict(int)
-        for doc in data:
+        for doc in tqdm(data):
             with self.stats.time_stats:
                 for n_gram in self.get_ngrams(doc):
                     counter[n_gram] += 1
 
         
         counts = sorted(counter.items(), key=lambda x: x[0])
+        for (ngram, count) in counts:
+            if count == 17:
+                print(ngram, count)
         self.save(rank, counts)
-
-
-
-
-        
-
-
-
-
-
 
 class NgramMerge(PipelineStep):
     """NgramMerge: Second pipeline step
@@ -140,10 +135,16 @@ class NgramMerge(PipelineStep):
 
     def read_sigs(self, file: AbstractBufferedFile, file_id, records_to_buffer: int = 5
     ) -> Generator[Sig, None, None]:
+        reader = struct.Struct(f"<{self.config.ngram * 'i'}Q")
         with file as f:
-            records = np.fromfile(f, dtype=[("ngram", f"<U{self.config.ngram}"), ("count", "<u8")], count=records_to_buffer)
-            for record in records:
-                yield Sig(n_gram=record["ngram"], count=record["count"], file_id=file_id)
+            while True:
+                records = f.read(records_to_buffer * reader.size)
+                if not records:
+                    return
+
+                records = np.frombuffer(f.read(records_to_buffer * reader.size), dtype=[("ngram", f"<U{self.config.ngram}"), ("count", "<u8")])
+                for record in records:
+                    yield Sig(record["ngram"], record["count"], file_id)
 
     def run(self, data: DocumentsPipeline = None, rank: int = 0, world_size: int = 1):
         if world_size != 1:
@@ -196,4 +197,4 @@ class NgramMerge(PipelineStep):
 
         # now save it to the output_mg
         with self.output_folder.open(out_filename, mode="wb") as f:
-            arr.tofile(f)
+            f.write(arr.tobytes())
