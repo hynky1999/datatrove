@@ -142,8 +142,8 @@ class NgramMerge(PipelineStep):
                 if not records:
                     return
 
-                records = np.frombuffer(f.read(records_to_buffer * reader.size), dtype=[("ngram", f"<U{self.config.ngram}"), ("count", "<u8")])
-                for record in records:
+                parsed_records = np.frombuffer(records, dtype=[("ngram", f"<U{self.config.ngram}"), ("count", "<u8")])
+                for record in parsed_records:
                     yield Sig(record["ngram"], record["count"], file_id)
 
     def run(self, data: DocumentsPipeline = None, rank: int = 0, world_size: int = 1):
@@ -189,6 +189,10 @@ class NgramMerge(PipelineStep):
 
                 if new_v:
                     heapq.heappush(pq, new_v)
+            
+            if last:
+                assert last.count < 2**(8*8), "Ngram count overflow"
+                counts.append(np.array([(last.count, last.n_gram)], dtype=[("count", "<u8"), ("ngram", f"<U{self.config.ngram}")]))
 
     
         # now load output_mg inmemory and sort it based on the count
