@@ -1,4 +1,5 @@
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import hashlib
 import heapq
@@ -19,12 +20,37 @@ import mmh3
 DTYPE = np.uint32 | np.uint64
 
 
-def mmh3_hash64(text: str, seed: int) -> int:
-    return mmh3.hash64(text, seed=seed)[0]
+def mmh3_hash64(texts: Iterable[str], k, seed: int) -> list[list[int]]:
+    """
+    Generate an [len(texts), k] array of hashes for each text in texts.
+    To generate independant hashes we use seeding, which should be good enough.
+    Universal hashing is rather unfeasable in our situation as the |U| is 2**64,
+    which would require < 2**64 prime, but we than can't utilize numpy.
+
+    Secondly we use mmh3 as it's way faster than sha and we certainly don't need
+    cryptographic security.
+
+    Args:
+        texts: texts to generate hashes for
+        k: number of hashes to generate
+        seed: seed for the first hashing function
+    """
+
+    def get_hashes_for_text(text: str):
+        hashes = [mmh3.hash64(text, seed=seed + i, signed=False) for i in range(k // 2)]
+        return [item for sublist in hashes for item in sublist][:k]
+
+    hashes = [get_hashes_for_text(text) for text in texts]
+    return hashes
 
 
 @dataclass
 class BloomCounterConfig:
+    """
+    The from_expected_elements method is recommended for creating a config, as it
+    takes into account the expected number of unique elements and expected memory consumption.
+    """
+
     size: int
     n_hash_fcs: int
     dtype: DTYPE
@@ -44,7 +70,7 @@ class BloomCounterConfig:
     ):
         """
         Given expected number of unique elements and expected memory consumption in GB,
-        returns optimal config given such constraints
+        returns optimal config given such constraints.
         """
         size_in_bytes = expected_mem_gb * 2**30
         arr_size = int(size_in_bytes / (np.dtype(dtype).itemsize))
@@ -106,7 +132,6 @@ class BloomCounter:
         self.k = config.n_hash_fcs
         # This should hopefuly give us k independent hash functions, we can't really use
         # universal hashing, as we need over 32 bits :/
-        self.hashers = [partial(mmh3_hash64, seed=self.seed + i) for i in range(self.k)]
         self._bloom_array = np.zeros(
             config.size,
             dtype=config.dtype,
@@ -141,11 +166,10 @@ class BloomCounter:
         """
         Returns the count of the ngram in the bloom filter
         """
-        x = list(ngrams)
-        return np.fromiter(
-            (hasher(ngram) for ngram in x for hasher in self.hashers),
+        return np.array(
+            mmh3_hash64(ngrams, self.k, self.seed),
             dtype=self._bloom_array.dtype,
-        ).reshape(-1, self.k)
+        )
 
     @classmethod
     def from_array(
@@ -268,7 +292,6 @@ class TopK:
         return topK
 
     def tobytes(self):
-        # Not sure whether it's faster than poping and reinstering
         return np.array(
             self.heap,
             dtype=[("count", self.count_dtype), ("ngram", f"<U{self.ngram_size}")],
