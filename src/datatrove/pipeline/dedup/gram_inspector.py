@@ -366,7 +366,7 @@ class BloomCounterMerge(PipelineStep):
 
         bloom_counter = BloomCounter(partition_bloom_config)
         with self.track_time():
-            for file in self.input_folder.open_files(files):
+            for file in tqdm(self.input_folder.open_files(files)):
                 bloom_counter += bloom_counter.frombuffers(
                     [file.read()], partition_bloom_config
                 )
