@@ -60,7 +60,7 @@ def read_tuples_from_file(file: BinaryIO, *formats, lines_to_buffer: int = 5):
         yield from reader.iter_unpack(chunk)
 
 
-def simplify_text(text: str) -> str:
+def simplify_text(text: str, remove_punctuation: bool = True) -> str:
     """Performs the following operations to increase recall when looking for matches between documents:
     - lowercase text
     - replace all whitespace with a single " "
@@ -79,7 +79,8 @@ def simplify_text(text: str) -> str:
     # remove consecutive spaces, newlines, tabs in the middle and in the beginning / end
     text = re.sub(r"\s+", " ", text.strip())
     # remove punctuation
-    text = text.translate(str.maketrans("", "", PUNCTUATION))
+    if remove_punctuation:
+        text = text.translate(str.maketrans("", "", PUNCTUATION))
     # diacritics/unicode normalization
     text = "".join(
         c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"

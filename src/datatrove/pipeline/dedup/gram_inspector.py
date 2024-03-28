@@ -76,9 +76,7 @@ DEFAULT_GRAM_FINDER_CONFIG = NgramsConfig()
 def get_ngrams(doc: Document, config: NgramsConfig) -> Generator[str, None, None]:
     from nltk import ngrams, word_tokenize
 
-    normalize
-
-    text = doc.text
+    text = simplify_text(doc.text, remove_punctuation=False)
     tokens = text if config.char_level else word_tokenize(text)
     join_char = " " if not config.char_level else ""
     n_grams = (join_char.join(ngram) for ngram in ngrams(tokens, config.n))
