@@ -341,7 +341,8 @@ class BloomCounterNgrams(PipelineStep):
             for doc in data:
                 bloomCounter.add(get_ngrams(doc, self.ngram_config))
 
-            for i, buffer in enumerate(bloomCounter.tobytes(self.finder_workers)):
+            logger.info("Writing bloom parititions to disk")
+            for i, buffer in tqdm(enumerate(bloomCounter.tobytes(self.finder_workers))):
                 with self.output_folder.open(
                     f"{i:04d}/{rank:04d}{ExtensionHelperTN.stage_1_bc_local}", "wb"
                 ) as f:
