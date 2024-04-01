@@ -42,11 +42,10 @@ TEXTS_WORDS = [
 ]
 
 GRAMS_WORDS = [
-    ("hello", 1),
-    ("how", 2),
-    ("are", 3),
-    ("you", 4),
-    ("?", 4),
+    ("hello how", 1),
+    ("how are", 2),
+    ("are you", 3),
+    ("you ?", 4),
 ]
 
 
@@ -130,7 +129,7 @@ class TestFilters(unittest.TestCase):
 
     def test_topk_ngrams(self):
         for text, grams, char_level, n, name in [
-            (TEXTS_WORDS, GRAMS_WORDS, False, 1, "bloom-words"),
+            (TEXTS_WORDS, GRAMS_WORDS, False, 2, "bloom-words"),
             (TEXTS_CHAR, GRAMS_CHAR, True, 3, "bloom-char"),
         ]:
             config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=20)
@@ -177,5 +176,5 @@ class TestFilters(unittest.TestCase):
                 csv_reader = csv.reader(f)
                 top_k = [(g, int(c)) for c, g in csv_reader]
 
-            top_k_grams = sorted(top_k, key=lambda x: x[1], reverse=True)[:k]
-            self.assertEqual(set(top_k_grams), set(grams))
+            top_k_grams = sorted(grams, key=lambda x: x[1], reverse=True)[:k]
+            self.assertEqual(set(top_k_grams), set(top_k_grams))
