@@ -1,6 +1,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import gc
 import hashlib
 import heapq
 from dataclasses import dataclass, replace
@@ -284,18 +285,25 @@ class TopK:
     def frombuffer(
         cls, buffer: bytes, k: int, ngram_size: int, count_dtype: np.dtype
     ) -> "TopK":
-        topK = TopK(k, ngram_size, count_dtype)
-        topK.heap = np.frombuffer(
-            buffer, dtype=[("count", count_dtype), ("ngram", f"<U{ngram_size}")]
+        max_char_length = np.frombuffer(buffer, dtype=np.int64, count=1)[0]
+        ngrams_data = np.frombuffer(
+            buffer,
+            offset=np.dtype(np.int64).itemsize,
+            dtype=[("count", count_dtype), ("ngram", f"<U{max_char_length}")],
         ).tolist()
-        topK.elements = set(ngram for ngram, _ in topK.heap)
+        topK = TopK(k, ngram_size, count_dtype)
+        topK.heap = ngrams_data
+        topK.elements = set(ngram for _, ngram in ngrams_data)
         return topK
 
     def tobytes(self):
-        return np.array(
+        max_char_length = max(len(ngram) for _, ngram in self.heap)
+        data_array = np.array(
             self.heap,
-            dtype=[("count", self.count_dtype), ("ngram", f"<U{self.ngram_size}")],
-        ).tobytes()
+            dtype=[("count", self.count_dtype), ("ngram", f"<U{max_char_length}")],
+        )
+        max_length_info = np.array([max_char_length], dtype=np.int64)
+        return max_length_info.tobytes() + data_array.tobytes()
 
 
 class BloomCounterNgrams(PipelineStep):
@@ -394,9 +402,11 @@ class BloomCounterMerge(PipelineStep):
         bloom_counter = BloomCounter(partition_bloom_config)
         with self.track_time():
             for file in tqdm(self.input_folder.open_files(files)):
-                bloom_counter += bloom_counter.frombuffers(
+                merged_bloom = BloomCounter.frombuffers(
                     [file.read()], partition_bloom_config
                 )
+
+                bloom_counter += merged_bloom
 
             with self.output_folder.open(
                 f"{rank:04d}{ExtensionHelperTN.stage_2_bc_global}", "wb"

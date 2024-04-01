@@ -20,18 +20,33 @@ from datatrove.pipeline.dedup.gram_inspector import (
 )
 
 
-TEXTS = [
+TEXTS_CHAR = [
     Document(text="hello", id="0"),
     Document(text="hel", id="1"),
     Document(text="lo", id="2"),
     Document(text="hllo", id="3"),
 ]
 
-GRAMS = [
+GRAMS_CHAR = [
     ("ell", 1),
     ("hel", 2),
     ("hll", 1),
     ("llo", 2),
+]
+
+TEXTS_WORDS = [
+    Document(text="hello how are you?", id="0"),
+    Document(text="how are you?", id="1"),
+    Document(text="are you?", id="2"),
+    Document(text="you?", id="3"),
+]
+
+GRAMS_WORDS = [
+    ("hello", 1),
+    ("how", 2),
+    ("are", 3),
+    ("you", 4),
+    ("?", 4),
 ]
 
 
@@ -53,7 +68,7 @@ class TestFilters(unittest.TestCase):
             ngram_config=ngram_config,
         )
 
-        bloom_block.run(data=TEXTS)
+        bloom_block.run(data=TEXTS_CHAR)
 
         bloom_files = bloom_folder.list_files(
             glob_pattern=f"**/*{ExtensionHelperTN.stage_1_bc_local}"
@@ -65,8 +80,8 @@ class TestFilters(unittest.TestCase):
             config,
         )
 
-        counts = bloom_array.get([g for g, _ in GRAMS])
-        self.assertEqual(counts, [c for _, c in GRAMS])
+        counts = bloom_array.get([g for g, _ in GRAMS_CHAR])
+        self.assertEqual(counts, [c for _, c in GRAMS_CHAR])
 
     def test_bloom_overflow(self):
         config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=10)
@@ -77,7 +92,7 @@ class TestFilters(unittest.TestCase):
         self.assertEqual(bloom_array.get("a")[0], np.iinfo(np.uint32).max)
 
     def test_bloom_distributed_merge(self):
-        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=10)
+        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=20)
 
         ngram_config = NgramsConfig(n=3, char_level=True)
         bloom_folder = DataFolder(f"{self.tmp_dir}/bloom")
@@ -94,11 +109,11 @@ class TestFilters(unittest.TestCase):
             bloom_config=config,
         )
 
-        bc1.run(data=TEXTS[:2], rank=0, world_size=2)
-        bc1.run(data=TEXTS[2:], rank=1, world_size=2)
+        bc1.run(data=TEXTS_CHAR[:2], rank=0, world_size=2)
+        bc1.run(data=TEXTS_CHAR[2:], rank=1, world_size=2)
 
         for i in range(4):
-            merge_block.run(data=TEXTS, rank=i, world_size=4)
+            merge_block.run(data=TEXTS_CHAR, rank=i, world_size=4)
 
         bloom_files = bloom_folder.list_files(
             glob_pattern=f"**/*{ExtensionHelperTN.stage_2_bc_global}"
@@ -110,52 +125,57 @@ class TestFilters(unittest.TestCase):
             config,
         )
 
-        counts = bloom_array.get([g for g, _ in GRAMS])
-        self.assertEqual(counts, [c for _, c in GRAMS])
+        counts = bloom_array.get([g for g, _ in GRAMS_CHAR])
+        self.assertEqual(counts, [c for _, c in GRAMS_CHAR])
 
     def test_topk_ngrams(self):
-        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=10)
+        for text, grams, char_level, n, name in [
+            (TEXTS_WORDS, GRAMS_WORDS, False, 1, "bloom-words"),
+            (TEXTS_CHAR, GRAMS_CHAR, True, 3, "bloom-char"),
+        ]:
+            config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=20)
 
-        ngram_config = NgramsConfig(n=3, char_level=True)
-        bloom_folder = DataFolder(f"{self.tmp_dir}/bloom")
-        bc = BloomCounterNgrams(
-            output_folder=bloom_folder,
-            bloom_config=config,
-            ngram_config=ngram_config,
-            finder_workers=1,
-        )
+            ngram_config = NgramsConfig(n=n, char_level=char_level)
+            bloom_folder = DataFolder(f"{self.tmp_dir}/{name}")
+            bc = BloomCounterNgrams(
+                output_folder=bloom_folder,
+                bloom_config=config,
+                ngram_config=ngram_config,
+                finder_workers=1,
+            )
 
-        merge_block = BloomCounterMerge(
-            input_folder=bloom_folder,
-            output_folder=bloom_folder,
-            bloom_config=config,
-        )
+            merge_block = BloomCounterMerge(
+                input_folder=bloom_folder,
+                output_folder=bloom_folder,
+                bloom_config=config,
+            )
 
-        k = 2
-        topK = TopKCounter(
-            input_folder=bloom_folder,
-            output_folder=bloom_folder,
-            bloom_config=config,
-            ngram_config=ngram_config,
-            k=k,
-        )
-        topKMerge = TopKMerge(
-            input_folder=bloom_folder,
-            output_folder=bloom_folder,
-            bloom_config=config,
-            ngram_config=ngram_config,
-            k=k,
-        )
+            k = 2
+            topK = TopKCounter(
+                input_folder=bloom_folder,
+                output_folder=bloom_folder,
+                bloom_config=config,
+                ngram_config=ngram_config,
+                k=k,
+            )
+            topKMerge = TopKMerge(
+                input_folder=bloom_folder,
+                output_folder=bloom_folder,
+                bloom_config=config,
+                ngram_config=ngram_config,
+                k=k,
+            )
 
-        bc.run(data=TEXTS)
-        merge_block.run(data=TEXTS)
-        topK.run(data=TEXTS)
-        topKMerge.run(data=TEXTS)
+            bc.run(data=text)
+            merge_block.run(data=text)
+            topK.run(data=text)
+            topKMerge.run(data=text)
 
-        with bloom_folder.open(
-            f"{0:04d}{ExtensionHelperTN.stage_4_top_k_global}", "rt"
-        ) as f:
-            csv_reader = csv.reader(f)
-            top_k = [(g, int(c)) for c, g in csv_reader]
+            with bloom_folder.open(
+                f"{0:04d}{ExtensionHelperTN.stage_4_top_k_global}", "rt"
+            ) as f:
+                csv_reader = csv.reader(f)
+                top_k = [(g, int(c)) for c, g in csv_reader]
 
-        self.assertEqual(set(top_k), {("hel", 2), ("llo", 2)})
+            top_k_grams = sorted(top_k, key=lambda x: x[1], reverse=True)[:k]
+            self.assertEqual(set(top_k_grams), set(grams))
