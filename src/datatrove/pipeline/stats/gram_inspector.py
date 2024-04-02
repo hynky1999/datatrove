@@ -1,48 +1,22 @@
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
-import gc
-import hashlib
 import heapq
-from dataclasses import dataclass, replace
 import math
-from typing import Callable, Generator, Iterable
+from dataclasses import dataclass, replace
+import types
+from typing import Generator, Iterable
 
+import mmh3
 import numpy as np
 from loguru import logger
 from tqdm import tqdm
 
 from datatrove.data import Document, DocumentsPipeline
-from datatrove.io import DataFolder, DataFolderLike, get_datafolder
+from datatrove.io import DataFolderLike, get_datafolder
 from datatrove.pipeline.base import PipelineStep
-from .utils import ExtensionHelperTN, simplify_text
-import mmh3
 
-DTYPE = np.uint32 | np.uint64
+from ..dedup.utils import ExtensionHelperTN, simplify_text
 
 
-def mmh3_hash64(texts: Iterable[str], k, seed: int) -> list[list[int]]:
-    """
-    Generate an [len(texts), k] array of hashes for each text in texts.
-    To generate independant hashes we use seeding, which should be good enough.
-    Universal hashing is rather unfeasable in our situation as the |U| is 2**64,
-    which would require < 2**64 prime, but we than can't utilize numpy.
-
-    Secondly we use mmh3 as it's way faster than sha and we certainly don't need
-    cryptographic security.
-
-    Args:
-        texts: texts to generate hashes for
-        k: number of hashes to generate
-        seed: seed for the first hashing function
-    """
-
-    def get_hashes_for_text(text: str):
-        hashes = [mmh3.hash64(text, seed=seed + i, signed=False) for i in range(k // 2)]
-        return [item for sublist in hashes for item in sublist][:k]
-
-    hashes = [get_hashes_for_text(text) for text in texts]
-    return hashes
+COUNTER_DTYPE = type([np.uint32]) | type(np.uint64)
 
 
 @dataclass
@@ -54,7 +28,7 @@ class BloomCounterConfig:
 
     size: int
     n_hash_fcs: int
-    dtype: DTYPE
+    dtype: COUNTER_DTYPE
     seed: int = 0
 
     @classmethod
@@ -66,7 +40,7 @@ class BloomCounterConfig:
         cls,
         expected_elements: int,
         expected_mem_gb: int,
-        dtype: DTYPE,
+        dtype: COUNTER_DTYPE,
         seed: int = 0,
     ):
         """
@@ -89,6 +63,13 @@ class BloomCounterConfig:
         return (
             1 - np.exp(-self.n_hash_fcs * expected_elements / self.size)
         ) ** self.n_hash_fcs
+
+
+DEFAULT_GRAM_FINDER_CONFIG = BloomCounterConfig(
+    size=1_500_000_000,
+    n_hash_fcs=3,
+    dtype=np.uint32,
+)
 
 
 @dataclass
@@ -293,7 +274,7 @@ class TopK:
         ).tolist()
         topK = TopK(k, ngram_size, count_dtype)
         topK.heap = ngrams_data
-        topK.elements = set(ngram for _, ngram in ngrams_data)
+        topK.elements = {ngram for _, ngram in ngrams_data}
         return topK
 
     def tobytes(self):
@@ -473,7 +454,6 @@ class TopKCounter(PipelineStep):
 
 
 class TopKMerge(PipelineStep):
-
     type = "🧐 - INSPECT"
     name = "🔤 top-k-ngrams-global-top"
     _requires_dependencies = ["nltk", "mmh3"]
