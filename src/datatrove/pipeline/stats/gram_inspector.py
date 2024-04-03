@@ -130,10 +130,12 @@ class BloomCounter:
     def add(self, ngrams: Iterable[str]):
         """
         Adds an gram to the bloom filter
+
+        Returns unique n-grams and its counts
         """
         indexes = self.get_indexes(self._get_shingles(ngrams))
         if indexes.size == 0:
-            return
+            return []
         # Sligthly faster than np.add.at
         idx, inverse, cnt = np.unique(
             indexes.reshape(-1), return_counts=True, return_inverse=True
@@ -264,13 +266,11 @@ class TopK:
     It uses a heap to keep the k most frequent ngrams.
     """
 
-    def __init__(self, k: int, ngram_size: int, count_dtype: np.dtype):
-        # TODO: get the ngram_size only when saving/loading
+    def __init__(self, k: int, count_dtype: np.dtype):
         self.k = k
         self.heap: list[tuple[int, str]] = []
         # Use set for faster duplicate look-up
         self.elements = set()
-        self.ngram_size = ngram_size
         self.count_dtype = count_dtype
 
     @property
@@ -301,16 +301,14 @@ class TopK:
         self.elements.add(ngram)
 
     @classmethod
-    def frombuffer(
-        cls, buffer: bytes, k: int, ngram_size: int, count_dtype: np.dtype
-    ) -> "TopK":
+    def frombuffer(cls, buffer: bytes, k: int, count_dtype: np.dtype) -> "TopK":
         max_char_length = np.frombuffer(buffer, dtype=np.int64, count=1)[0]
         ngrams_data = np.frombuffer(
             buffer,
             offset=np.dtype(np.int64).itemsize,
             dtype=[("count", count_dtype), ("ngram", f"<U{max_char_length}")],
         ).tolist()
-        topK = TopK(k, ngram_size, count_dtype)
+        topK = TopK(k, count_dtype)
         topK.heap = ngrams_data
         topK.elements = {ngram for _, ngram in ngrams_data}
         return topK
@@ -377,57 +375,6 @@ class BloomCounterNgrams(PipelineStep):
                     f"{i:04d}/{rank:04d}{ExtensionHelperTN.stage_1_bc_local}", "wb"
                 ) as f:
                     f.write(buffer)
-
-
-class OptimisticBlookAndTopKCounter(PipelineStep):
-    """
-    Computes NGrams occurence, using BloomCounter and saves the BloomCounter to the sik.
-    It calculates topk on the fly without saving the bloom counter. This might produce incorrect results
-
-    Args:
-        output_folder: folder where signatures + counters are saved
-        workers: number of workers that will be used in bloomCounter merging stage
-        config: configuration of the bloom filter
-    """
-    type = "🧐 - INSPECT"
-    name = "🔤 top-k-ngrams-bloom-counter"
-    _requires_dependencies = ["nltk", "mmh3"]
-
-    def __init__(
-        self,
-        output_folder: DataFolderLike,
-        bloom_config: BloomCounterConfig,
-        ngram_config: NgramsConfig,
-        k: int,
-        finder_workers: int = 1,
-        buffer_size: int = 1000,
-    ):
-        super().__init__()
-
-        if finder_workers <= 0:
-            raise ValueError("finder_workers must be >= 1")
-        elif finder_workers > 1:
-            logger.warning(
-                f"Remember to also set the name of tasks of the finder block to {finder_workers=}!"
-            )
-
-        self.finder_workers = finder_workers
-        self.output_folder = get_datafolder(output_folder)
-        self.bloom_config = bloom_config
-        self.ngram_config = ngram_config
-        self.buffer_size = buffer_size
-        self.k = k
-
-    def run(self, data: DocumentsPipeline, rank: int = 0, world_size: int = 1):
-        bloomCounter = BloomCounter(self.bloom_config)
-        topK = TopK(self.k, self.ngram_config.n, self.bloom_config.dtype)
-        with self.track_time():
-            for doc in data:
-                ngrams = list(get_ngrams(doc, self.ngram_config))
-                for count, ngram in topK.(ngrams):
-                    topK.add(ngram, count)
-
-
 
 
 class BloomCounterMerge(PipelineStep):
@@ -524,7 +471,6 @@ class TopKCounter(PipelineStep):
 
         topK = TopK(
             self.k,
-            self.ngram_config.n,
             self.bloom_config.dtype,
         )
         # This time we do not counting, we only use bloom counter as refferece as now it's global one
@@ -571,11 +517,11 @@ class TopKMerge(PipelineStep):
             glob_pattern=f"**/*{ExtensionHelperTN.stage_3_top_k_local}"
         )
 
-        topK = TopK(self.k, self.ngram_config.n, self.bloom_config.dtype)
+        topK = TopK(self.k, self.bloom_config.dtype)
         with self.track_time():
             for f in self.input_folder.open_files(files):
                 top_k_instance = TopK.frombuffer(
-                    f.read(), self.k, self.ngram_config.n, self.bloom_config.dtype
+                    f.read(), self.k, self.bloom_config.dtype
                 )
                 for count, ngram in top_k_instance.heap:
                     topK.add(ngram, count)

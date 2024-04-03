@@ -7,6 +7,11 @@ import numpy as np
 from datatrove.data import Document
 from datatrove.io import DataFolder
 from datatrove.pipeline.dedup.utils import ExtensionHelperTN
+from datatrove.pipeline.stats.fast_gram_inspector import (
+    MergeTopKCounters,
+    OptimisticBloomAndTopKCounter,
+    TopKSortedArray,
+)
 
 from tests.utils import require_nltk
 from datatrove.pipeline.stats.gram_inspector import (
@@ -50,7 +55,7 @@ GRAMS_WORDS = [
 
 
 @require_nltk
-class TestFilters(unittest.TestCase):
+class TestGramInspector(unittest.TestCase):
     def setUp(self):
         # Create a temporary directory
         self.tmp_dir = tempfile.mkdtemp()
@@ -97,8 +102,8 @@ class TestFilters(unittest.TestCase):
         self.assertEqual(counts, [1, 1, 1, 1])
         counts = bloom_array.add("abcd")
         self.assertEqual(counts, [2, 2, 2, 2])
-        counts = bloom_array.add("a")
-        self.assertEqual(counts, [3])
+        counts = bloom_array.add("aa")
+        self.assertEqual(counts, [4, 4])
 
     def test_bloom_distributed_merge(self):
         config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=30)
@@ -142,7 +147,7 @@ class TestFilters(unittest.TestCase):
             (TEXTS_WORDS, GRAMS_WORDS, False, 2, "bloom-words"),
             (TEXTS_CHAR, GRAMS_CHAR, True, 3, "bloom-char"),
         ]:
-            config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=20)
+            config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=30)
 
             ngram_config = NgramsConfig(n=n, char_level=char_level)
             bloom_folder = DataFolder(f"{self.tmp_dir}/{name}")
@@ -186,5 +191,102 @@ class TestFilters(unittest.TestCase):
                 csv_reader = csv.reader(f)
                 top_k = [(g, int(c)) for c, g in csv_reader]
 
-            top_k_grams = sorted(grams, key=lambda x: x[1], reverse=True)[:k]
-            self.assertEqual(set(top_k_grams), set(top_k_grams))
+            expected_top_k_grams = sorted(grams, key=lambda x: x[1], reverse=True)[:k]
+            self.assertEqual(set(top_k), set(expected_top_k_grams))
+
+
+class TestTopKSortedArray(unittest.TestCase):
+    def setUp(self):
+        self.top_k = TopKSortedArray(
+            k=4,
+            count_dtype=np.uint32,
+        )
+
+    def test_add_decreasing_unique(self):
+        for i in range(10, 0, -1):
+            self.top_k.add(str(i), i)
+
+        self.assertEqual(
+            self.top_k.to_list(),
+            [(i, str(i)) for i in sorted(range(1, 11), reverse=True)[: self.top_k.k]],
+        )
+
+    def test_add_unique(self):
+        for i in range(10):
+            self.top_k.add(str(i), i)
+
+        self.assertEqual(
+            self.top_k.to_list(),
+            [(i, str(i)) for i in sorted(range(1, 10), reverse=True)[: self.top_k.k]],
+        )
+
+    def test_add_increases(self):
+        sequence = [("a", 1), ("a", 2), ("b", 3), ("b", 4)]
+        for ngram, count in sequence:
+            self.top_k.add(ngram, count)
+
+        self.assertEqual(
+            self.top_k.to_list(),
+            [(4, "b"), (2, "a")],
+        )
+
+    def test_add_increases_2(self):
+        sequence = [("b", 2), ("b", 4), ("a", 1), ("a", 3)]
+        for ngram, count in sequence:
+            self.top_k.add(ngram, count)
+
+        self.assertEqual(
+            self.top_k.to_list(),
+            [(4, "b"), (3, "a")],
+        )
+
+
+@require_nltk
+class TestFastGramInspector(unittest.TestCase):
+    def setUp(self):
+        # Create a temporary directory
+        self.tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp_dir)
+
+    def test_topk_ngrams(self):
+        for text, grams, char_level, n, name in [
+            (TEXTS_WORDS, GRAMS_WORDS, False, 2, "bloom-words"),
+            (TEXTS_CHAR, GRAMS_CHAR, True, 3, "bloom-char"),
+        ]:
+            config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=30)
+
+            ngram_config = NgramsConfig(n=n, char_level=char_level)
+            topK_folder = DataFolder(f"{self.tmp_dir}/{name}")
+            bc = OptimisticBloomAndTopKCounter(
+                output_folder=topK_folder,
+                bloom_config=config,
+                ngram_config=ngram_config,
+                k=4,
+            )
+
+            bc2 = OptimisticBloomAndTopKCounter(
+                output_folder=topK_folder,
+                bloom_config=config,
+                ngram_config=ngram_config,
+                k=4,
+            )
+
+            merge = MergeTopKCounters(
+                input_folder=topK_folder,
+                output_folder=topK_folder,
+                k=2,
+                bloom_config=config,
+            )
+
+            bc.run(data=text[::2], rank=0, world_size=2)
+            bc2.run(data=text[1::2], rank=1, world_size=2)
+            merge.run(data=text, rank=0, world_size=1)
+
+            with topK_folder.open(
+                f"{0:04d}{ExtensionHelperTN.stage_4_top_k_global}", "rt"
+            ) as f:
+                csv_reader = csv.reader(f)
+                top_k = [(g, int(c)) for c, g in csv_reader]
+
+            expected_top_k_grams = sorted(grams, key=lambda x: x[1], reverse=True)[:2]
+            self.assertEqual(set(top_k), set(expected_top_k_grams))
