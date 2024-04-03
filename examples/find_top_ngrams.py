@@ -6,7 +6,7 @@ from datatrove.executor.local import LocalPipelineExecutor
 
 from datatrove.executor.slurm import SlurmPipelineExecutor
 from loguru import logger
-from datatrove.pipeline.dedup.gram_inspector import (
+from datatrove.pipeline.stats.gram_inspector import (
     BloomCounterConfig,
     BloomCounterMerge,
     BloomCounterNgrams,

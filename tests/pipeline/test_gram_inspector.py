@@ -9,7 +9,7 @@ from datatrove.io import DataFolder
 from datatrove.pipeline.dedup.utils import ExtensionHelperTN
 
 from tests.utils import require_nltk
-from datatrove.pipeline.dedup.gram_inspector import (
+from datatrove.pipeline.stats.gram_inspector import (
     BloomCounter,
     BloomCounterNgrams,
     BloomCounterMerge,
@@ -57,7 +57,7 @@ class TestFilters(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp_dir)
 
     def test_bloom_counter_step(self):
-        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=20)
+        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=30)
         ngram_config = NgramsConfig(n=3, char_level=True)
         bloom_folder = DataFolder(f"{self.tmp_dir}/bloom")
 
@@ -90,8 +90,18 @@ class TestFilters(unittest.TestCase):
         # Check that we haven't overflown
         self.assertEqual(bloom_array.get("a")[0], np.iinfo(np.uint32).max)
 
+    def test_bloom_add_return(self):
+        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=30)
+        bloom_array = BloomCounter(config)
+        counts = bloom_array.add("abcd")
+        self.assertEqual(counts, [1, 1, 1, 1])
+        counts = bloom_array.add("abcd")
+        self.assertEqual(counts, [2, 2, 2, 2])
+        counts = bloom_array.add("a")
+        self.assertEqual(counts, [3])
+
     def test_bloom_distributed_merge(self):
-        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=20)
+        config = BloomCounterConfig(dtype=np.uint32, n_hash_fcs=2, size=30)
 
         ngram_config = NgramsConfig(n=3, char_level=True)
         bloom_folder = DataFolder(f"{self.tmp_dir}/bloom")

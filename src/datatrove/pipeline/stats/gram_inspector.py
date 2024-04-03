@@ -14,9 +14,12 @@ from datatrove.io import DataFolderLike, get_datafolder
 from datatrove.pipeline.base import PipelineStep
 
 from ..dedup.utils import ExtensionHelperTN, simplify_text
+from xxhash import xxh3_64_intdigest
 
 
 COUNTER_DTYPE = type([np.uint32]) | type(np.uint64)
+_mersenne_prime = np.uint64((1 << 61) - 1)
+MAX_HASH = 1 << 32 - 1
 
 
 @dataclass
@@ -120,6 +123,9 @@ class BloomCounter:
         )
 
         self._parameters = None
+        self.fast_modulo = (
+            np.uint64(config.size - 1) if config.size % 2**32 == 0 else None
+        )
 
     def add(self, ngrams: Iterable[str]):
         """
@@ -129,13 +135,18 @@ class BloomCounter:
         if indexes.size == 0:
             return
         # Sligthly faster than np.add.at
-        idx, cnt = np.unique(indexes.reshape(-1), return_counts=True)
+        idx, inverse, cnt = np.unique(
+            indexes.reshape(-1), return_counts=True, return_inverse=True
+        )
         new_cnt = cnt.astype(self._bloom_array.dtype) + self._bloom_array[idx]
         overflow_mask = new_cnt < self._bloom_array[idx]  # Check for overflow
-
-        self._bloom_array[idx] = np.where(
+        new_cnt = np.where(
             overflow_mask, np.iinfo(self._bloom_array.dtype).max, new_cnt
         )
+
+        self._bloom_array[idx] = new_cnt
+
+        return np.min(new_cnt[inverse].reshape(-1, self.k), axis=1).tolist()
 
     def get(self, ngrams: Iterable[str]) -> list[int]:
         indexes = self.get_indexes(self._get_shingles(ngrams))
@@ -144,14 +155,33 @@ class BloomCounter:
             return []
         return np.min(self._bloom_array[indexes], axis=1).tolist()
 
+    @property
+    def parameters(self):
+        """Returns the parameters for the hash functions.
+            Create parameters for a random bijective permutation function
+            that maps a 64-bit hash value to another 32-bit hash value.
+            http://en.wikipedia.org/wiki/Universal_hashing
+
+        Returns:
+            tuple: (a, b) parameters for the hash functions
+                where a and b are numpy uint64 arrays of shape (1, k) containing the
+                random parameters for the hash functions.
+        """
+        if not self._parameters:
+            gen = np.random.RandomState(self.seed)
+            self._parameters = (
+                gen.randint(1, _mersenne_prime, dtype=np.uint64, size=(1, self.k)),
+                gen.randint(0, _mersenne_prime, dtype=np.uint64, size=(1, self.k)),
+            )
+        return self._parameters
+
     def _get_shingles(self, ngrams: Iterable[str]) -> np.ndarray:
-        """
-        Returns the count of the ngram in the bloom filter
-        """
-        return np.array(
-            mmh3_hash64(ngrams, self.k, self.seed),
+        a, b = self.parameters
+        shingles = np.fromiter(
+            [xxh3_64_intdigest(ngram, seed=self.seed) for ngram in ngrams],
             dtype=self._bloom_array.dtype,
-        )
+        ).reshape(-1, 1)
+        return (shingles * a + b) % _mersenne_prime
 
     @classmethod
     def from_array(
@@ -208,6 +238,9 @@ class BloomCounter:
 
     def get_indexes(self, shingles: np.ndarray):
         """Get indexes for the shingles with the k hashing functions"""
+        # If we are hashing into 2**N, we can use bitwise_and to speed up the process
+        if self.fast_modulo:
+            return np.bitwise_and(shingles, self.fast_modulo)
         return shingles % self._bloom_array.size
 
     def __add__(self, other: "BloomCounter") -> "BloomCounter":
@@ -243,6 +276,11 @@ class TopK:
     @property
     def min(self):
         return self.heap[0][0] if self.heap else -1
+
+    def replace(self, ngram: str, count: int):
+        # swap the first element with the new one
+        self.heap[0] = (count, ngram)
+        heapq.heapify(self.heap)
 
     def add(self, ngram: str, count: int):
         # First check that we don't have the ngram in the heap already
@@ -339,6 +377,57 @@ class BloomCounterNgrams(PipelineStep):
                     f"{i:04d}/{rank:04d}{ExtensionHelperTN.stage_1_bc_local}", "wb"
                 ) as f:
                     f.write(buffer)
+
+
+class OptimisticBlookAndTopKCounter(PipelineStep):
+    """
+    Computes NGrams occurence, using BloomCounter and saves the BloomCounter to the sik.
+    It calculates topk on the fly without saving the bloom counter. This might produce incorrect results
+
+    Args:
+        output_folder: folder where signatures + counters are saved
+        workers: number of workers that will be used in bloomCounter merging stage
+        config: configuration of the bloom filter
+    """
+    type = "🧐 - INSPECT"
+    name = "🔤 top-k-ngrams-bloom-counter"
+    _requires_dependencies = ["nltk", "mmh3"]
+
+    def __init__(
+        self,
+        output_folder: DataFolderLike,
+        bloom_config: BloomCounterConfig,
+        ngram_config: NgramsConfig,
+        k: int,
+        finder_workers: int = 1,
+        buffer_size: int = 1000,
+    ):
+        super().__init__()
+
+        if finder_workers <= 0:
+            raise ValueError("finder_workers must be >= 1")
+        elif finder_workers > 1:
+            logger.warning(
+                f"Remember to also set the name of tasks of the finder block to {finder_workers=}!"
+            )
+
+        self.finder_workers = finder_workers
+        self.output_folder = get_datafolder(output_folder)
+        self.bloom_config = bloom_config
+        self.ngram_config = ngram_config
+        self.buffer_size = buffer_size
+        self.k = k
+
+    def run(self, data: DocumentsPipeline, rank: int = 0, world_size: int = 1):
+        bloomCounter = BloomCounter(self.bloom_config)
+        topK = TopK(self.k, self.ngram_config.n, self.bloom_config.dtype)
+        with self.track_time():
+            for doc in data:
+                ngrams = list(get_ngrams(doc, self.ngram_config))
+                for count, ngram in topK.(ngrams):
+                    topK.add(ngram, count)
+
+
 
 
 class BloomCounterMerge(PipelineStep):
