@@ -33,11 +33,6 @@ class TopKSortedArray:
     """
     TopKSortedArray is a class that implements non-probabilistic TopK strucutre.
     Assumptions:
-    - The values of the same elements added are increasing
-    Complexity:
-    add: O(n)
-
-    Under more strict assumption:
     - The values of the same elements added increasing by 1
     Complexity:
     add: O(1)
@@ -80,15 +75,25 @@ class TopKSortedArray:
         Bubble up the element at index until it's ge than its predecessor
         """
 
-        value = self.sorted_arr[index]
-        while (
-            index > 0 and (swap := self.sorted_arr[index - 1]) and (swap[0] < value[0])
-        ):
-            self.sorted_arr[index] = swap
-            self.index_map[swap[1]] = index
+        elem = self.sorted_arr[index]
+        value = elem[0]
+        while index > 0 and self.sorted_arr[index - 1][0] < value:
+            # Small optimization if we have sequence of the same values,
+            # we have to only swap with the last element
+            l_end = self._get_left_end_of_same_value_sequence(index - 1)
+            # Move the end to index
+            self.sorted_arr[index] = self.sorted_arr[l_end]
+            self.index_map[self.sorted_arr[index][1]] = index
+
+            index = l_end
+
+        self.sorted_arr[index] = elem
+        self.index_map[elem[1]] = index
+        return index
+
+    def _get_left_end_of_same_value_sequence(self, index: int):
+        while index > 0 and self.sorted_arr[index - 1][0] == self.sorted_arr[index][0]:
             index -= 1
-        self.sorted_arr[index] = value
-        self.index_map[value[1]] = index
         return index
 
     def _try_insert(self, ngram: str, count: int):
@@ -165,9 +170,9 @@ class OptimisticBloomAndTopKCounter(PipelineStep):
         with self.track_time():
             for doc in data:
                 ngrams = list(get_ngrams(doc, self.ngram_config))
-                counts = bloomCounter.add(ngrams)
-                for count, ngram in zip(counts, ngrams):
-                    topK.add(ngram, count)
+                totals = bloomCounter.add(ngrams)
+                for total, ngram in zip(totals, ngrams):
+                    topK.add(ngram, total)
 
             # Now we save the topK by sorting the array by ngrams
             sortedTopK = sorted(topK.to_list(), key=lambda x: x[1])
