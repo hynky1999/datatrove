@@ -7,11 +7,61 @@ from datatrove.pipeline.base import PipelineStep
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
+    
+
+def get_dup_consequtive_kgram_ids(sequence: np.ndarray, tokens_cum_sum: np.ndarray, k: int, min_rep: int, min_size: int):
+    """
+    Takes a sequence and returns a list of indexes to remove
+    """
+    if len(sequence) // 2 < k:
+        return []
+    view = sliding_window_view(sequence, k)
+
+    # Do array wise comparisson
+    same_sequences = np.all(view[:-k] == view[k:], axis=1)
+
+    indx_to_remove = []
+
+    def start_stop(a):
+        # "Enclose" mask with sentients to catch shifts later on
+        mask = np.r_[False,a,False]
+
+        # Get the shifting indices
+        idx = np.flatnonzero(mask[1:] != mask[:-1])
+
+        # Get the start and end indices with slicing along the shifting ones
+        return np.column_stack((idx[::2], idx[1::2] - 1))
+
+    # Guilherme is genius
+    def process_sequence(cum_sum, same_sequences, k, min_size, min_rep):
+        indexes = []
+        for shift in range(k):
+            idx = start_stop(same_sequences[shift::k])
+            real_idx = idx * k + shift
+            indexes.extend(real_idx)
+
+        # sort by first and then second column
+        if len(indexes) == 0:
+            return []
+        indexes = np.vstack(indexes)
+        indexes = indexes[np.argsort(indexes[:, 0])]
+
+        selected_indexes_reps_where = (indexes[:, 1] - indexes[:, 0]) // k >= min_rep
+        selected_cumulative_sums = cum_sum[indexes]
+        selected_indexes_size = selected_cumulative_sums[:, 1] - selected_cumulative_sums[:, 0] > min_size
+        indexes = indexes[selected_indexes_size | selected_indexes_reps_where]
+        # Convert -1,2 matrix to list of tuples
+        spans = indexes.tolist()
+        return spans
+
+    indx_to_remove = process_sequence(tokens_cum_sum, same_sequences, k, min_size, min_rep)
+    
+    return indx_to_remove
 
 def get_dup_consequtive_mutli_kgram_ids(tokens: list[str], min_k: int, max_k: int, min_rep: int, min_size: int):
     """
     Takes tokens and returns indexes of token, which are duplicated consequtive k-gram.
-    When choosing which to remove the preceeding is always chosen.
+    When choosing which to remove the first is always chosen.
 
     To allow 
 
@@ -20,51 +70,16 @@ def get_dup_consequtive_mutli_kgram_ids(tokens: list[str], min_k: int, max_k: in
     tokens = ["a", "b", "a", "b", "d"]
     -> [0, 1]
     """
-    tokens_arr = np.array(tokens)
+    # First convert string tokens to integers, for multiple k this allows faster comparisson
+    _, int_tokens = np.unique(tokens, return_inverse=True)
+    tokens_cum_sum = np.array([len(token) for token in tokens])
     all_idx_to_remove = set()
     for k in range(max_k, min_k - 1, -1):
-        idx_to_remove = get_dup_consequtive_kgram_ids(tokens_arr, k, min_rep, min_size)
-        all_idx_to_remove.update(idx_to_remove)
+        idx_to_remove = get_dup_consequtive_kgram_ids(int_tokens, tokens_cum_sum, k, min_rep, min_size)
+        all_idx_to_remove.update(set(tuple(x) for x in idx_to_remove))
     
     return list(all_idx_to_remove)
-    
 
-def get_dup_consequtive_kgram_ids(sequence: np.ndarray, k: int, min_rep: int, min_size: int):
-    """
-    Takes a sequence and returns a list of indexes to remove
-    """
-    if len(sequence) // 2 < k:
-        return []
-    view = sliding_window_view(sequence[:-k], k)
-    view_plus_k = sliding_window_view(sequence[k:], k)
-
-    # Do array wise comparisson
-    same_sequences = np.all(view == view_plus_k, axis=1)
-    i = 0
-    indx_to_remove = []
-
-    # Guilherme is genius
-    cumulative_sum = np.cumsum([len(token) for token in sequence])
-    while i < len(same_sequences):
-        new_possible_start = i
-        # Jump over the duplicates till you find a non-duplicate
-        while new_possible_start < len(same_sequences) and same_sequences[new_possible_start]:
-            new_possible_start += k
-
-        # If we didn't jump at all
-        if new_possible_start == i:
-            i += 1
-        else:
-            repetition_length = cumulative_sum[new_possible_start + k - 1] - cumulative_sum[i]
-            reps = (new_possible_start - i) // k
-            # If the repetition satisfies constraints add indxes to remove
-            if repetition_length >= min_size or reps >= min_rep:
-                indx_to_remove.extend(range(i, new_possible_start))
-            # In both cases we move the index, in case on not satisfaction
-            # this speed-up the search
-            i = new_possible_start
-    
-    return indx_to_remove
 
 class GramDeduplication(PipelineStep):
     def __init__(self, min_span_size: int=45, min_k_gram: int = 1, max_k_gram: int = 10, min_rep: int = 30):
