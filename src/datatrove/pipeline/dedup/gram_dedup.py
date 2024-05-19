@@ -203,7 +203,7 @@ class GramDeduplication(PipelineStep):
     
     def dedup_text(self, text: str):
         # Heuristic for not deduplicating tables
-        if '|' in text and self.deduplicated_md_tables:
+        if '|' in text and not self.deduplicated_md_tables:
             return text
 
         spans = list(self.tokenizer.span_tokenize(text))
@@ -224,7 +224,7 @@ class GramDeduplication(PipelineStep):
     def run(self, data: DocumentsPipeline, rank: int = 0, world_size: int = 1) -> DocumentsPipeline:
         for document in data:
             # Prefer line by line 
-            lines = document.text.split("\n") if self.deduplicate_over_lines else [document.text]
+            lines = document.text.split("\n") if not self.deduplicate_over_lines else [document.text]
             deduplicated_lines = [self.dedup_text(line) for line in lines]
             document.text = "\n".join(deduplicated_lines)
         return data
