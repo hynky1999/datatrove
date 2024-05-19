@@ -102,8 +102,6 @@ def get_dup_consequtive_kgram_ids(sequence: np.ndarray, tokens_cum_sum: np.ndarr
     # Do array wise comparisson
     same_sequences = np.all(view[:-k] == view[k:], axis=1)
 
-    indx_to_remove = np.array([])
-
     def start_stop(a):
         # "Enclose" mask with sentients to catch shifts later on
         mask = np.r_[False,a,False]
@@ -114,30 +112,25 @@ def get_dup_consequtive_kgram_ids(sequence: np.ndarray, tokens_cum_sum: np.ndarr
         # Get the start and end indices with slicing along the shifting ones
         return np.column_stack((idx[::2], idx[1::2]))
 
-    def process_sequence(sequence_cum_sum, same_sequences, k, min_size, min_rep):
-        spans = []
-        for shift in range(k):
-            idx = start_stop(same_sequences[shift::k])
-            real_idx = idx * k + shift
-            spans.extend(real_idx)
+    spans = []
+    for shift in range(k):
+        idx = start_stop(same_sequences[shift::k])
+        real_idx = idx * k + shift
+        spans.extend(real_idx)
 
-        # sort by first and then second column
-        if len(spans) == 0:
-            return np.array([])
-        spans = np.vstack(spans)
-        spans[:, 1] += k
-        spans = spans[np.argsort(spans[:, 0])]
+    # sort by first and then second column
+    if len(spans) == 0:
+        return np.array([])
+    spans = np.vstack(spans)
+    spans[:, 1] += k
+    spans = spans[np.argsort(spans[:, 0])]
 
-        spans_with_min_reps = (spans[:, 1] - spans[:, 0]) // k >= min_rep + 1
-        # The end is non-inclusive so we have to use -1
-        # To get size between start and end from cumsums we have access start-1
-        spans_with_min_size = sequence_cum_sum[spans[:, 1]-1] - sequence_cum_sum[np.max(spans[:, 0]-1, 0)] >= min_size
-        spans = spans[spans_with_min_reps | spans_with_min_size]
-        return spans
-
-    indx_to_remove = process_sequence(tokens_cum_sum, same_sequences, k, min_size, min_rep)
-    
-    return indx_to_remove
+    spans_with_min_reps = (spans[:, 1] - spans[:, 0]) // k >= min_rep + 1
+    # The end is non-inclusive so we have to use -1
+    # To get size between start and end from cumsums we have access start-1
+    spans_with_min_size = tokens_cum_sum[spans[:, 1]-1] - tokens_cum_sum[np.max(spans[:, 0]-1, 0)] >= min_size
+    spans = spans[spans_with_min_reps | spans_with_min_size]
+    return spans
 
 def get_dup_consequtive_mutli_kgram_ids(tokens: list[str], min_k: int, max_k: int, min_rep: int, min_size: int, max_split_size: int, split_overlap: int):
     """
