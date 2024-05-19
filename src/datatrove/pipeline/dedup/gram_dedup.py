@@ -128,7 +128,7 @@ def get_dup_consequtive_kgram_ids(sequence: np.ndarray, tokens_cum_sum: np.ndarr
     spans_with_min_reps = (spans[:, 1] - spans[:, 0]) // k >= min_rep + 1
     # The end is non-inclusive so we have to use -1
     # To get size between start and end from cumsums we have access start-1
-    spans_with_min_size = tokens_cum_sum[spans[:, 1]-1] - tokens_cum_sum[np.max(spans[:, 0]-1, 0)] >= min_size
+    spans_with_min_size = tokens_cum_sum[spans[:, 1]-1] - tokens_cum_sum[np.maximum(spans[:, 0]-1, 0)] >= min_size
     spans = spans[spans_with_min_reps | spans_with_min_size]
     return spans
 
