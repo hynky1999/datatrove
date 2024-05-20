@@ -37,9 +37,9 @@ def select_non_overlapping_spans(spans_to_remove_list: list[tuple[int, int, int]
     if len(spans_to_remove_list) == 0:
         return []
 
-    # Sort the spans, first by k to cover with the biggest k-grams first, then by start
+    # Sort the spans, first by span_size to cover with the biggest reps first, then by start
     # -> For same k start_i-1 <= start_i
-    spans_to_remove_list = sorted(spans_to_remove_list, key=lambda x: (-x[2], x[0], -x[1]))
+    spans_to_remove_list = sorted(spans_to_remove_list, key=lambda x: (-(x[1]-x[0]), x[0], -x[1]))
     last_start = spans_to_remove_list[0][2]
     cur_idx = 0
     # Rule: ordered by span[0] + no overlap
@@ -91,7 +91,7 @@ def select_non_overlapping_spans(spans_to_remove_list: list[tuple[int, int, int]
     return new_spans[1:]
 
 
-def get_dup_consequtive_kgram_ids(sequence: np.ndarray, tokens_cum_sum: np.ndarray, k: int, min_rep: int, min_size: int):
+def get_dup_consequtive_kgram_ids(sequence: np.ndarray, tokens_cum_sum: np.ndarray, k: int, min_rep: int, min_size: int, condition_mode: str):
     """
     Takes a sequence and 2xI matrix of spans signifying the start and end of the span which are duplicated
     """
@@ -129,10 +129,15 @@ def get_dup_consequtive_kgram_ids(sequence: np.ndarray, tokens_cum_sum: np.ndarr
     # The end is non-inclusive so we have to use -1
     # To get size between start and end from cumsums we have access start-1
     spans_with_min_size = tokens_cum_sum[spans[:, 1]-1] - tokens_cum_sum[np.maximum(spans[:, 0]-1, 0)] >= min_size
-    spans = spans[spans_with_min_reps | spans_with_min_size]
+    spans_condition = spans_with_min_reps
+    if condition_mode == "&":
+        spans_condition = spans_condition & spans_with_min_size
+    elif condition_mode == "|":
+        spans_condition = spans_condition | spans_with_min_size
+    spans = spans[spans_condition]
     return spans
 
-def get_dup_consequtive_mutli_kgram_ids(tokens: list[str], min_k: int, max_k: int, min_rep: int, min_size: int, max_split_size: int, split_overlap: int):
+def get_dup_consequtive_mutli_kgram_ids(tokens: list[str], min_k: int, max_k: int, min_rep: int, min_size: int, condition_mode: str, max_split_size: int, split_overlap: int):
     """
     Takes list of strings and returns [start, end) spans of duplicated consecutive k-grams
     When choosing which to remove the first k-grams are always chosen.
@@ -163,7 +168,7 @@ def get_dup_consequtive_mutli_kgram_ids(tokens: list[str], min_k: int, max_k: in
         _, int_tokens = np.unique(split_tokens, return_inverse=True)
         tokens_cum_sum = np.cumsum([len(token) for token in split_tokens])
         for k in range(min_k, max_k + 1):
-            new_spans_to_remove = get_dup_consequtive_kgram_ids(int_tokens, tokens_cum_sum, k, min_rep, min_size)
+            new_spans_to_remove = get_dup_consequtive_kgram_ids(int_tokens, tokens_cum_sum, k, min_rep, min_size, condition_mode)
             offseted_idx_to_remove = [(start + start_split, end + start_split, k) for start, end in new_spans_to_remove]
             spans_to_remove.extend(offseted_idx_to_remove)
     
@@ -172,23 +177,8 @@ def get_dup_consequtive_mutli_kgram_ids(tokens: list[str], min_k: int, max_k: in
     return with_removed_last
 
 
-        
-
-        
-    
-
-
-def normalize_text(text):
-    text = re.sub(r'\d+(\.\d+)?', '<NUMBER>', text)
-    months = ['january', 'february', 'march', 'april', 'may', 'june', 
-              'july', 'august', 'september', 'october', 'november', 'december']
-    for month in months:
-        text = text.replace(month, '<MONTH>')
-    return text
-
-
 class GramDeduplication(PipelineStep):
-    def __init__(self, text_norm_config: TextNormConfig = TextNormConfig(norm_numbers=False, remove_punctuation=False), deduplicated_md_tables: bool = False, deduplicate_over_lines: bool = False, min_span_size: int=45, min_k_gram: int = 1, max_k_gram: int = 10, min_rep: int = 1, span_size: int=20000):
+    def __init__(self, text_norm_config: TextNormConfig = TextNormConfig(norm_numbers=False, remove_punctuation=False), deduplicated_md_tables: bool = False, deduplicate_over_lines: bool = False, min_span_size: int=45, min_k_gram: int = 1, max_k_gram: int = 10, min_rep: int = 1, condition_mode: str = "|", span_size: int=20000):
         from nltk import NLTKWordTokenizer
         tokenizer = NLTKWordTokenizer()
         self.min_span_size = min_span_size
@@ -198,6 +188,7 @@ class GramDeduplication(PipelineStep):
         self.span_size = span_size
         self.deduplicated_md_tables = deduplicated_md_tables
         self.deduplicate_over_lines = deduplicate_over_lines
+        self.condition_mode = condition_mode
         self.text_norm_config = text_norm_config
         self.tokenizer = tokenizer
     
@@ -212,7 +203,7 @@ class GramDeduplication(PipelineStep):
         # Thus we use right delimiter
         tokens_with_right_delimiter = [text[span_prev[0]:span_next[0]] for span_prev, span_next in zip(spans[:-1], spans[1:])] + [text[spans[-1][0]:]]
         overlap = self.max_k_gram * (self.min_rep + 1)
-        spans_to_remove = get_dup_consequtive_mutli_kgram_ids(tokens, self.min_k_gram, self.max_k_gram, self.min_rep, self.min_span_size, self.span_size, overlap)
+        spans_to_remove = get_dup_consequtive_mutli_kgram_ids(tokens, self.min_k_gram, self.max_k_gram, self.min_rep, self.min_span_size, self.condition_mode, self.span_size, overlap)
         if len(spans_to_remove) == 0:
             return text
         
@@ -232,7 +223,7 @@ class GramDeduplication(PipelineStep):
 
 
 class LineDeduplication(PipelineStep):
-    def __init__(self, text_norm_config: TextNormConfig = TextNormConfig(norm_numbers=False, remove_punctuation=False), min_span_size: int=1, min_k_gram: int = 1, max_k_gram: int = 3, min_rep: int = 1, span_size: int=20000):
+    def __init__(self, text_norm_config: TextNormConfig = TextNormConfig(norm_numbers=False, remove_punctuation=False), min_span_size: int=1, min_k_gram: int = 1, max_k_gram: int = 3, min_rep: int = 1, condition_mode="&" ,span_size: int=20000):
         if min_span_size < 1:
             logger.warning("It's recommended to have min_span_size >= 1 so that consecutive newlines are not considered duplicates")
 
@@ -246,6 +237,8 @@ class LineDeduplication(PipelineStep):
         self.min_rep = min_rep
         self.text_norm_config = text_norm_config
         self.span_size = span_size
+        self.condition_mode = condition_mode
+
         self.tokenizer = tokenizer
     
 
@@ -257,7 +250,7 @@ class LineDeduplication(PipelineStep):
             simplified_lines = [simplify_text(line, self.text_norm_config) for line in lines]
             span_to_remove = get_dup_consequtive_mutli_kgram_ids(
                 simplified_lines,
-                self.min_k_gram, self.max_k_gram, self.min_rep, self.min_span_size, self.span_size, overlap)
+                self.min_k_gram, self.max_k_gram, self.min_rep, self.min_span_size, self.condition_mode, self.span_size, overlap)
             if len(span_to_remove) > 0:
                 # Use non-simplified lines
                 document.text = "\n".join(remove_spans(lines, span_to_remove))
